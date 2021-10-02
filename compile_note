@@ -1,4 +1,6 @@
-VC COMMAND进入到该目录，
+VC COMMAND进入到目录；
+当环境VC 编译环境是64位时，编译出的程序为64位；
+当环境VC 编译环境是32位时，编译出的程序为32位.
 
 编译：
 nmake /f PathSync\makefile
