@@ -1,4 +1,8 @@
-#define PATHSYNC_VER "v0.42BETA"
+#ifdef _WIN64
+#define PATHSYNC_VER "v0.43-x64"
+#else
+#define PATHSYNC_VER "v0.43"
+#endif
 
 /*
     PathSync - pathsync.cpp
@@ -24,10 +28,15 @@
     You should have received a copy of the GNU General Public License
     along with PathSync; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+    
+    ver 0.43:
+    add support for x64 by Colin, 2021.08.12
+    
 */
 
 
 #include <windows.h>
+#include <winUser.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -52,6 +61,9 @@
 
 #ifdef _WIN32
 #define PREF_DIRSTR "\\"
+#elif _WIN64
+#define PREF_DIRSTR "\\"
+#elif _WIN64
 #else
 #define PREF_DIRSTR "/"
 #endif
@@ -592,13 +604,17 @@ BOOL WINAPI mainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             SetWindowText(hwndDlg, "PathSync " PATHSYNC_VER " - Analysis");
 
             HICON icon = LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1));
-            SetClassLong(hwndDlg, GCL_HICON, (long) icon);
+
+            SetClassLongPtr(hwndDlg, GCLP_HICON, (LONG_PTR)icon);
+
             if (g_systray) systray_add(hwndDlg, 0, icon, (char *) "PathSync");
             m_listview = GetDlgItem(hwndDlg, IDC_LIST1);
 
             WDL_UTF8_HookListView(m_listview);
 
 #ifdef _WIN32
+            ListView_SetExtendedListViewStyleEx(m_listview, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
+#elif _WIN64
             ListView_SetExtendedListViewStyleEx(m_listview, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
 #endif
 
@@ -918,7 +934,7 @@ BOOL WINAPI mainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
                     GetDlgItemText(hwndDlg, LOWORD(wParam) == IDC_BROWSE1 ? IDC_PATH1 : IDC_PATH2, oldpath, sizeof(oldpath));
                     BROWSEINFO bi = {hwndDlg, NULL, name, "Choose a Directory", BIF_RETURNONLYFSDIRS, MyBrowseCallbackProc, (LPARAM) oldpath};
 
-                    ITEMIDLIST *id = SHBrowseForFolder(&bi);
+                    ITEMIDLIST *id = (ITEMIDLIST*) SHBrowseForFolder(&bi);
                     if (id) {
                         SHGetPathFromIDList(id, name);
 
@@ -977,7 +993,7 @@ BOOL WINAPI mainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
                         LogMessage("Sync");
 
                         ShowWindow(hwndDlg, SW_HIDE);
-                        g_copydlg = CreateDialog(g_hInstance, MAKEINTRESOURCE(IDD_DIALOG2), NULL, copyFilesProc);
+                        g_copydlg=CreateDialog(g_hInstance, MAKEINTRESOURCE(IDD_DIALOG2), NULL, (DLGPROC) copyFilesProc);
                         if (!g_systray || !g_intray) ShowWindow(g_copydlg, SW_NORMAL);
                     }
                     break;
@@ -986,7 +1002,7 @@ BOOL WINAPI mainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
                     break;
                 case IDC_SETCOMPARE:
                     EnableWindow(g_dlg, FALSE);
-                    DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_DIFFTOOL), NULL, diffToolProc);
+                    DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_DIFFTOOL), NULL, (DLGPROC) diffToolProc);
                     EnableWindow(g_dlg, TRUE);
                     SetFocus(g_dlg);
                     break;
@@ -1096,7 +1112,7 @@ BOOL WINAPI mainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
                                 // If no diff application has been chosen, give the user the opportunity to do it now.
                                 if (strlen(path) == 0) {
                                     EnableWindow(g_dlg, FALSE);
-                                    DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_DIFFTOOL), NULL, diffToolProc);
+                                    DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_DIFFTOOL), NULL,(DLGPROC) diffToolProc);
                                     EnableWindow(g_dlg, TRUE);
                                     SetFocus(g_dlg);
 
@@ -1541,6 +1557,27 @@ char *skip_root(char *path) {
 
         return p2;
     }
+#elif _WIN64
+    char *p = (path + 1);
+    char *p2 = (p + 1);
+
+    if (*path && *p == ':' && *p2 == '\\') {
+        return (p2 + 1);
+    }
+    else if (*path == '\\' && *p == '\\') {
+        // skip host and share name
+        int x = 2;
+        while (x--) {
+            while (*p2 != '\\') {
+                if (!*p2)
+                    return NULL;
+                p2 = (p2 + 1);
+            }
+            p2 = (p2 + 1);
+        }
+
+        return p2;
+    }
 #else
   if (*path == '/') return path+1;
 #endif
@@ -1550,6 +1587,11 @@ char *skip_root(char *path) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdParam, int nShowCmd) {
 #ifdef _WIN32
+    if (GetVersion() < 0x80000000) {
+        LPSTR s = GetCommandParametersUTF8();
+        if (s) lpszCmdParam = s;
+    }
+#elif _WIN64
     if (GetVersion() < 0x80000000) {
         LPSTR s = GetCommandParametersUTF8();
         if (s) lpszCmdParam = s;
@@ -1613,7 +1655,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdPa
     }
 
     // fg, 4/20/2005, changed from DialogBox to CreateDialogBox + messagequeue in order to be able to start the dialog hidden
-    g_dlg = CreateDialog(hInstance, MAKEINTRESOURCE(IDD_DIALOG1), NULL, mainDlgProc);
+    g_dlg = CreateDialog(hInstance, MAKEINTRESOURCE(IDD_DIALOG1), NULL, (DLGPROC) mainDlgProc);
     if (!g_systray) {ShowWindow(g_dlg, SW_NORMAL);}
     else g_intray = true;
 
