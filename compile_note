@@ -1,0 +1,7 @@
+VC COMMAND进入到该目录，
+
+编译：
+nmake /f PathSync\makefile
+
+清除：
+nmake /f PathSync\makefile clean
