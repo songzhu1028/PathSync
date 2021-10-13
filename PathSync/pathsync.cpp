@@ -1,7 +1,7 @@
 #ifdef _WIN64
-#define PATHSYNC_VER "v0.43-x64"
+#define PATHSYNC_VER "v0.44-x64"
 #else
-#define PATHSYNC_VER "v0.43"
+#define PATHSYNC_VER "v0.44"
 #endif
 
 /*
