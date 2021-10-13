@@ -36,25 +36,40 @@ For information on how to use this class, see wndsize.h :)
 void WDL_WndSizer::init(HWND hwndDlg, RECT *initr)
 {
   m_hwnd=hwndDlg;
+  RECT r={0,};
   if (initr)
-    m_orig_rect=*initr;
-  else
-    GetClientRect(m_hwnd,&m_orig_rect);
+    r=*initr;
+  else if (m_hwnd) 
+    GetClientRect(m_hwnd,&r);
+  set_orig_rect(&r);
+  if (m_base_dpi>0) m_base_dpi = calc_dpi(hwndDlg);
+
   m_list.Resize(0);
 
   memset(&m_margins,0,sizeof(m_margins));
 }
 
 
+void WDL_WndSizer::init_item(int dlg_id, float *scales, RECT *initr)
+{
+  init_item(dlg_id,scales[0],scales[1],scales[2],scales[3],initr);
+}
+void WDL_WndSizer::init_itemvirt(WDL_VWnd *vwnd, float *scales)
+{
+  init_itemvirt(vwnd,scales[0],scales[1],scales[2],scales[3]);
+}
+
 void WDL_WndSizer::init_itemvirt(WDL_VirtualWnd *vwnd, 
                                  float left_scale, float top_scale, float right_scale, float bottom_scale)
 {
   RECT this_r={0,};
   if (vwnd) vwnd->GetPosition(&this_r);
-  int osize=m_list.GetSize();
-  m_list.Resize(osize+sizeof(WDL_WndSizer__rec));
+  
+  const int osize=m_list.GetSize();
+  m_list.Resize(osize+1);
+  if (m_list.GetSize() != osize + 1) return;
 
-  WDL_WndSizer__rec *rec=(WDL_WndSizer__rec *) ((char *)m_list.Get()+osize);
+  WDL_WndSizer__rec *rec=m_list.Get()+osize;
 
   rec->hwnd=0;
   rec->vwnd=vwnd;
@@ -65,6 +80,17 @@ void WDL_WndSizer::init_itemvirt(WDL_VirtualWnd *vwnd,
   rec->real_orig = rec->last = rec->orig = this_r;
 }
 
+POINT WDL_WndSizer::get_min_size(bool applyMargins) const
+{ 
+  POINT p = m_min_size;
+  if (applyMargins)
+  {
+    p.x += m_margins.left+m_margins.right;
+    p.y += m_margins.top+m_margins.bottom;
+  }
+  return p; 
+}
+
 
 void WDL_WndSizer::init_itemhwnd(HWND h, float left_scale, float top_scale, float right_scale, float bottom_scale, RECT *srcr)
 {
@@ -73,9 +99,11 @@ void WDL_WndSizer::init_itemhwnd(HWND h, float left_scale, float top_scale, floa
   else if (h)
   {
     GetWindowRect(h,&this_r);
-    ScreenToClient(m_hwnd,(LPPOINT) &this_r);
-    ScreenToClient(m_hwnd,((LPPOINT) &this_r)+1);
-    
+    if (m_hwnd)
+    {
+      ScreenToClient(m_hwnd,(LPPOINT) &this_r);
+      ScreenToClient(m_hwnd,((LPPOINT) &this_r)+1);
+    }    
   #ifndef _WIN32
     if (this_r.bottom < this_r.top)
     {
@@ -85,10 +113,11 @@ void WDL_WndSizer::init_itemhwnd(HWND h, float left_scale, float top_scale, floa
     }
   #endif
   }
-  int osize=m_list.GetSize();
-  m_list.Resize(osize+sizeof(WDL_WndSizer__rec));
+  const int osize=m_list.GetSize();
+  m_list.Resize(osize+1);
+  if (m_list.GetSize() != osize + 1) return;
 
-  WDL_WndSizer__rec *rec=(WDL_WndSizer__rec *) ((char *)m_list.Get()+osize);
+  WDL_WndSizer__rec *rec=m_list.Get()+osize;
 
   rec->hwnd=h;
   rec->vwnd=0;
@@ -102,25 +131,35 @@ void WDL_WndSizer::init_itemhwnd(HWND h, float left_scale, float top_scale, floa
 
 void WDL_WndSizer::init_item(int dlg_id, float left_scale, float top_scale, float right_scale, float bottom_scale, RECT *initr)
 {
-  init_itemhwnd(GetDlgItem(m_hwnd,dlg_id),left_scale,top_scale,right_scale,bottom_scale,initr);
+  if (m_hwnd)
+  {
+    HWND h = GetDlgItem(m_hwnd, dlg_id);
+    if (h) init_itemhwnd(h, left_scale, top_scale, right_scale, bottom_scale, initr);
+  }
 }
 
 #ifdef _WIN32
 BOOL CALLBACK WDL_WndSizer::enum_RegionRemove(HWND hwnd,LPARAM lParam)
 {
   WDL_WndSizer *_this=(WDL_WndSizer *)lParam;
-//  if(GetParent(hwnd)!=_this->m_hwnd) return TRUE;
     
   if (IsWindowVisible(hwnd)) 
   {
+    if(GetParent(hwnd)!=_this->m_hwnd) return TRUE;
     RECT r;
     GetWindowRect(hwnd,&r);
-    ScreenToClient(_this->m_hwnd,(LPPOINT)&r);
-    ScreenToClient(_this->m_hwnd,((LPPOINT)&r)+1);
-
-    HRGN rgn2=CreateRectRgn(r.left,r.top,r.right,r.bottom);
-    CombineRgn(_this->m_enum_rgn,_this->m_enum_rgn,rgn2,RGN_DIFF);
-    DeleteObject(rgn2);
+    if (_this->m_hwnd)
+    {
+      ScreenToClient(_this->m_hwnd,(LPPOINT)&r);
+      ScreenToClient(_this->m_hwnd,((LPPOINT)&r)+1);
+    }
+    if (RectInRegion(_this->m_enum_rgn,&r))
+    {
+      HRGN rgn2=CreateRectRgnIndirect(&r);
+      const int ret = CombineRgn(_this->m_enum_rgn,_this->m_enum_rgn,rgn2,RGN_DIFF);
+      DeleteObject(rgn2);
+      if (ret == NULLREGION || ret == ERROR) return FALSE;
+    }
   }
   
   return TRUE;
@@ -129,94 +168,133 @@ BOOL CALLBACK WDL_WndSizer::enum_RegionRemove(HWND hwnd,LPARAM lParam)
 
 void WDL_WndSizer::remove_item(int dlg_id)
 {
-  remove_itemhwnd(GetDlgItem(m_hwnd,dlg_id));
+  int x = m_list.GetSize();
+  while (--x >= 0)
+  {
+    const WDL_WndSizer__rec *rec = m_list.Get() + x;
+    if ((rec->hwnd && GetWindowLong(rec->hwnd,GWL_ID) == dlg_id) ||
+        (rec->vwnd && rec->vwnd->GetID() == dlg_id)) m_list.Delete(x);
+  }
 }
 
 void WDL_WndSizer::remove_itemhwnd(HWND h)
 {
-  WDL_WndSizer__rec *rec;
-  while ((rec=get_itembywnd(h)))
+  if (h)
   {
-    WDL_WndSizer__rec *list=(WDL_WndSizer__rec *) ((char *)m_list.Get());
-    int list_size=m_list.GetSize()/sizeof(WDL_WndSizer__rec);
-    int idx=rec-list;
-
-    if (idx >= 0 && idx < list_size-1)
-      memcpy(rec,rec+1,(list_size-(idx+1))*sizeof(WDL_WndSizer__rec));
-    m_list.Resize((list_size-1)*sizeof(WDL_WndSizer__rec));
+    int x = m_list.GetSize();
+    while (--x >= 0)
+    {
+      if (m_list.Get()[x].hwnd == h) m_list.Delete(x);
+    }
   }
 }
 
 void WDL_WndSizer::remove_itemvirt(WDL_VirtualWnd *vwnd)
 {
-  WDL_WndSizer__rec *rec;
-  while ((rec=get_itembyvirt(vwnd)))
+  if (vwnd)
   {
-    WDL_WndSizer__rec *list=(WDL_WndSizer__rec *) ((char *)m_list.Get());
-    int list_size=m_list.GetSize()/sizeof(WDL_WndSizer__rec);
-    int idx=rec-list;
-
-    if (idx >= 0 && idx < list_size-1)
-      memcpy(rec,rec+1,(list_size-(idx+1))*sizeof(WDL_WndSizer__rec));
-    m_list.Resize((list_size-1)*sizeof(WDL_WndSizer__rec));
+    int x = m_list.GetSize();
+    while (--x >= 0)
+    {
+      if (m_list.Get()[x].vwnd == vwnd) m_list.Delete(x);
+    }
   }
 }
 
+void WDL_WndSizer::transformRect(RECT *r, const float *scales, const RECT *wndSize) const
+{
+  POINT sz = { wndSize->right, wndSize->bottom };
+
+  sz.x -= m_margins.left+m_margins.right;
+  sz.y -= m_margins.top+m_margins.bottom;
+
+  if (sz.x < m_min_size.x) sz.x=m_min_size.x;
+  if (sz.y < m_min_size.y) sz.y=m_min_size.y;
+
+  sz.x -= m_orig_size.x;
+  sz.y -= m_orig_size.y;
+
+  if (scales[0] >= 1.0) r->left += sz.x;
+  else if (scales[0]>0.0) r->left += (int) (sz.x*scales[0]);
+
+  if (scales[1] >= 1.0) r->top += sz.y;
+  else if (scales[1]>0.0) r->top += (int) (sz.y*scales[1]);
+
+  if (scales[2] >= 1.0) r->right += sz.x;
+  else if (scales[2]>0.0) r->right += (int) (sz.x*scales[2]);
+
+  if (scales[3] >= 1.0) r->bottom += sz.y;
+  else if (scales[3]>0.0) r->bottom += (int) (sz.y*scales[3]);
+
+  r->left += m_margins.left;
+  r->right += m_margins.left;
+  r->top += m_margins.top;
+  r->bottom += m_margins.top;
+
+  if (r->bottom < r->top) r->bottom=r->top;
+  if (r->right < r->left) r->right=r->left;
+}
+
+void WDL_WndSizer::onResizeVirtual(int width, int height)
+{
+  RECT new_rect = {0,0,width,height};
+  for (int x = 0; x < m_list.GetSize(); x ++)
+  {
+    WDL_WndSizer__rec *rec=m_list.Get() + x;
+    if (rec->vwnd)
+    {
+      RECT r=rec->orig;
+      transformRect(&r,rec->scales,&new_rect);
+      rec->last = r;
+      rec->vwnd->SetPosition(&r);
+    }
+  }
+}
 
 void WDL_WndSizer::onResize(HWND only, int notouch, int xtranslate, int ytranslate)
 {
   if (!m_hwnd) return;
 
   RECT new_rect;
+
+  const int dpi = m_base_dpi > 0 ? calc_dpi(m_hwnd) : 0;
   
   GetClientRect(m_hwnd,&new_rect);
+
+  RECT new_rect_sc = new_rect;
+  if (dpi > 0 && dpi != m_base_dpi)
+  {
+    new_rect_sc.left = new_rect_sc.left * m_base_dpi / dpi;
+    new_rect_sc.top = new_rect_sc.top * m_base_dpi / dpi;
+    new_rect_sc.right = new_rect_sc.right * m_base_dpi / dpi;
+    new_rect_sc.bottom = new_rect_sc.bottom * m_base_dpi / dpi;
+  }
+
 #ifdef _WIN32
 
-  m_enum_rgn=CreateRectRgn(new_rect.left,new_rect.top,new_rect.right,new_rect.bottom);
- // EnumChildWindows(m_hwnd,enum_RegionRemove,(LPARAM)this);
+  m_enum_rgn=CreateRectRgnIndirect(&new_rect);
   
   HDWP hdwndpos=NULL;
   int has_dfwp=0;
 #endif
-  WDL_WndSizer__rec *rec=(WDL_WndSizer__rec *) ((char *)m_list.Get());
-  int cnt=m_list.GetSize() / sizeof(WDL_WndSizer__rec);
-
-  new_rect.right -= m_margins.left+m_margins.right;
-  new_rect.bottom -= m_margins.top+m_margins.bottom;
-
   int x;
-  for (x = 0; x < cnt; x ++)
+  for (x = 0; x < m_list.GetSize(); x ++)
   {
+    WDL_WndSizer__rec *rec=m_list.Get() + x;
 
     if ((rec->vwnd && !only) || (rec->hwnd && (!only || only == rec->hwnd)))
     {
-      RECT r;
-      if (rec->scales[0] <= 0.0) r.left = rec->orig.left;
-      else if (rec->scales[0] >= 1.0) r.left = rec->orig.left + new_rect.right - m_orig_rect.right;
-      else r.left = rec->orig.left + (int) ((new_rect.right - m_orig_rect.right)*rec->scales[0]);
-
-      if (rec->scales[1] <= 0.0) r.top = rec->orig.top;
-      else if (rec->scales[1] >= 1.0) r.top = rec->orig.top + new_rect.bottom - m_orig_rect.bottom;
-      else r.top = rec->orig.top + (int) ((new_rect.bottom - m_orig_rect.bottom)*rec->scales[1]);
-
-      if (rec->scales[2] <= 0.0) r.right = rec->orig.right;
-      else if (rec->scales[2] >= 1.0) r.right = rec->orig.right + new_rect.right - m_orig_rect.right;
-      else r.right = rec->orig.right + (int) ((new_rect.right - m_orig_rect.right)*rec->scales[2]);
-
-      if (rec->scales[3] <= 0.0) r.bottom = rec->orig.bottom;
-      else if (rec->scales[3] >= 1.0) r.bottom = rec->orig.bottom + new_rect.bottom - m_orig_rect.bottom;
-      else r.bottom = rec->orig.bottom + (int) ((new_rect.bottom - m_orig_rect.bottom)*rec->scales[3]);
-
-
-      r.left += m_margins.left;
-      r.right += m_margins.left;
-      r.top += m_margins.top;
-      r.bottom += m_margins.top;
-
-      if (r.bottom < r.top) r.bottom=r.top;
-      if (r.right < r.left) r.right=r.left;
-    
+      RECT r=rec->orig;
+      transformRect(&r,rec->scales,&new_rect_sc);
       rec->last = r;
+
+      if (rec->hwnd && m_base_dpi > 0 && dpi != m_base_dpi)
+      {
+        r.left = r.left * dpi / m_base_dpi;
+        r.top = r.top* dpi / m_base_dpi;
+        r.right = r.right * dpi / m_base_dpi;
+        r.bottom = r.bottom * dpi / m_base_dpi;
+      }
 
       if (!notouch)
       {
@@ -226,22 +304,21 @@ void WDL_WndSizer::onResize(HWND only, int notouch, int xtranslate, int ytransla
           if (!has_dfwp)
           {
             has_dfwp=1;
-            if (!only && GetVersion() < 0x80000000) hdwndpos=BeginDeferWindowPos(cnt);
+            if (!only 
+#ifdef WDL_SUPPORT_WIN9X
+            && GetVersion() < 0x80000000
+#endif
+            ) hdwndpos=BeginDeferWindowPos(m_list.GetSize() - x);
           }
 
 
-          if (IsWindow(rec->hwnd))
-          {
-            if (!hdwndpos) 
+          if (!hdwndpos) 
 #endif
-              SetWindowPos(rec->hwnd, NULL, r.left+xtranslate,r.top+ytranslate,r.right-r.left,r.bottom-r.top, SWP_NOZORDER|SWP_NOACTIVATE);
+            SetWindowPos(rec->hwnd, NULL, r.left+xtranslate,r.top+ytranslate,r.right-r.left,r.bottom-r.top, SWP_NOZORDER|SWP_NOACTIVATE);
           
 #ifdef _WIN32
-            else 
-            {
-              hdwndpos=DeferWindowPos(hdwndpos, rec->hwnd, NULL, r.left+xtranslate,r.top+ytranslate,r.right-r.left,r.bottom-r.top, SWP_NOZORDER|SWP_NOACTIVATE);
-            }
-          }
+          else 
+            hdwndpos=DeferWindowPos(hdwndpos, rec->hwnd, NULL, r.left+xtranslate,r.top+ytranslate,r.right-r.left,r.bottom-r.top, SWP_NOZORDER|SWP_NOACTIVATE);
 #endif
         }
         if (rec->vwnd)
@@ -250,7 +327,6 @@ void WDL_WndSizer::onResize(HWND only, int notouch, int xtranslate, int ytransla
         }
       }
     }
-    rec++;
   }
 #ifdef _WIN32
   if (hdwndpos) EndDeferWindowPos(hdwndpos);
@@ -261,21 +337,19 @@ void WDL_WndSizer::onResize(HWND only, int notouch, int xtranslate, int ytransla
 #endif
 }
 
-WDL_WndSizer__rec *WDL_WndSizer::get_itembyindex(int id)
+WDL_WndSizer__rec *WDL_WndSizer::get_itembyindex(int idx) const
 {
-  if (id >= 0 && id < (m_list.GetSize() / (int)sizeof(WDL_WndSizer__rec)))
-  {
-    return ((WDL_WndSizer__rec *) m_list.Get())+id;
-  }
+  if (idx >= 0 && idx < m_list.GetSize()) return m_list.Get()+idx;
+
   return NULL;
 }
 
-WDL_WndSizer__rec *WDL_WndSizer::get_itembywnd(HWND h)
+WDL_WndSizer__rec *WDL_WndSizer::get_itembywnd(HWND h) const
 {
   if (h)
   {
-    WDL_WndSizer__rec *rec=(WDL_WndSizer__rec *) ((char *)m_list.Get());
-    int cnt=m_list.GetSize() / sizeof(WDL_WndSizer__rec);
+    WDL_WndSizer__rec *rec=m_list.Get();
+    int cnt=m_list.GetSize();
     while (cnt--)
     {
       if (rec->hwnd == h) return rec;
@@ -286,11 +360,11 @@ WDL_WndSizer__rec *WDL_WndSizer::get_itembywnd(HWND h)
 }
 
 
-WDL_WndSizer__rec *WDL_WndSizer::get_itembyvirt(WDL_VirtualWnd *vwnd)
+WDL_WndSizer__rec *WDL_WndSizer::get_itembyvirt(WDL_VirtualWnd *vwnd) const
 {
   if (!vwnd) return 0;
-  WDL_WndSizer__rec *rec=(WDL_WndSizer__rec *) ((char *)m_list.Get());
-  int cnt=m_list.GetSize() / sizeof(WDL_WndSizer__rec);
+  WDL_WndSizer__rec *rec=m_list.Get();
+  int cnt=m_list.GetSize();
   while (cnt--)
   {
     if (rec->vwnd == vwnd) return rec;
@@ -299,15 +373,64 @@ WDL_WndSizer__rec *WDL_WndSizer::get_itembyvirt(WDL_VirtualWnd *vwnd)
   return 0;
 }
 
-WDL_WndSizer__rec *WDL_WndSizer::get_item(int dlg_id)
+WDL_WndSizer__rec *WDL_WndSizer::get_item(int dlg_id) const
 {
-  WDL_WndSizer__rec *rec=(WDL_WndSizer__rec *) ((char *)m_list.Get());
-  int cnt=m_list.GetSize() / sizeof(WDL_WndSizer__rec);
+  WDL_WndSizer__rec *rec=m_list.Get();
+  int cnt=m_list.GetSize();
   while (cnt--)
   {
     if (rec->vwnd && rec->vwnd->GetID() == dlg_id) return rec;
+    if (rec->hwnd && GetWindowLong(rec->hwnd, GWL_ID) == dlg_id) return rec;
     rec++;
   }
+  return NULL;
+}
 
-  return get_itembywnd(GetDlgItem(m_hwnd,dlg_id));
+bool WDL_WndSizer::sizer_to_dpi_rect(RECT *r, int dpi) const // returns true if modified
+{
+  if (r && m_base_dpi>0)
+  {
+    if (dpi<=0) dpi = calc_dpi(m_hwnd);
+    if (dpi > 0 && dpi != m_base_dpi)
+    {
+      r->left = r->left * dpi / m_base_dpi;
+      r->top = r->top * dpi / m_base_dpi;
+      r->right = r->right * dpi / m_base_dpi;
+      r->bottom = r->bottom * dpi / m_base_dpi;
+      return true;
+    }
+  }
+  return false;
+}
+
+
+int WDL_WndSizer::calc_dpi(HWND hwnd)
+{
+#ifdef _WIN32
+  static UINT (WINAPI *__GetDpiForWindow)(HWND);
+  if (!__GetDpiForWindow)
+  {
+    HINSTANCE h = GetModuleHandle("user32.dll");
+    if (h)
+    {
+      BOOL (WINAPI *__AreDpiAwarenessContextsEqual)(void *, void *);
+      void * (WINAPI *__GetThreadDpiAwarenessContext )();
+      *(void **)&__GetThreadDpiAwarenessContext = GetProcAddress(h,"GetThreadDpiAwarenessContext");
+      *(void **)&__AreDpiAwarenessContextsEqual = GetProcAddress(h,"AreDpiAwarenessContextsEqual");
+      if (__GetThreadDpiAwarenessContext && __AreDpiAwarenessContextsEqual)
+      {
+        if (__AreDpiAwarenessContextsEqual(__GetThreadDpiAwarenessContext(),(void*)(INT_PTR)-4))
+          *(void **)&__GetDpiForWindow = GetProcAddress(h,"GetDpiForWindow");
+      }
+    }
+    if (!__GetDpiForWindow)
+      *(INT_PTR*)&__GetDpiForWindow = 1;
+  }
+  if (*(INT_PTR*)&__GetDpiForWindow != 1)
+  {
+    if (!hwnd) return 256;
+    return __GetDpiForWindow(hwnd)*256 / 96;
+  }
+#endif
+  return 0;
 }
