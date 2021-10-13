@@ -31,8 +31,9 @@
 #ifndef _WDL_FILEWRITE_H_
 #define _WDL_FILEWRITE_H_
 
-
-
+#ifndef WDL_FILEWRITE_ON_ERROR
+#define WDL_FILEWRITE_ON_ERROR(is_full)
+#endif
 
 #include "ptrlist.h"
 
@@ -49,8 +50,13 @@
   #if !defined(WDL_NO_POSIX_FILEWRITE)
     #include <sys/fcntl.h>
     #include <sys/file.h>
+    #include <sys/stat.h>
     #include <sys/errno.h>
     #define WDL_POSIX_NATIVE_WRITE
+    extern struct stat wdl_stat_chk;
+    // if this fails on linux, use CFLAGS += -D_FILE_OFFSET_BITS=64
+    typedef char wdl_filewrite_assert_failed_stat_not_64[sizeof(wdl_stat_chk.st_size)!=8 ? -1 : 1];
+    typedef char wdl_filewrite_assert_failed_off_t_64[sizeof(off_t)!=8 ? -1 : 1];
   #endif
 #endif
 
@@ -61,8 +67,6 @@
 #else
 #define WDL_FILEWRITE_POSTYPE long long
 #endif
-
-//#define WIN32_ASYNC_NOBUF_WRITE // this doesnt seem to give much perf increase (writethrough with buffering is fine, since ultimately writes get deferred anyway)
 
 class WDL_FileWrite
 {
@@ -120,7 +124,9 @@ public:
 
 
 public:
-  WDL_FileWrite(const char *filename, int allow_async=1, int bufsize=8192, int minbufs=16, int maxbufs=16) // async==2 is unbuffered
+  // async==2 is write-through
+  // async==3 is non-buffered (win32-only)
+  WDL_FileWrite(const char *filename, int allow_async=1, int bufsize=8192, int minbufs=16, int maxbufs=16, bool wantAppendTo=false, bool noFileLocking=false) 
   {
     m_file_position=0;
     m_file_max_position=0;
@@ -140,24 +146,31 @@ public:
     }
 
 #ifdef WDL_WIN32_NATIVE_WRITE
-    bool isNT = (GetVersion()<0x80000000);
-    m_async = allow_async && isNT;
-#ifdef WIN32_ASYNC_NOBUF_WRITE
-    bufsize = (bufsize+4095)&~4095;
-    if (bufsize<4096) bufsize=4096;
-#endif
+    #ifdef WDL_SUPPORT_WIN9X
+    const bool isNT = (GetVersion()<0x80000000);
+    #else
+    const bool isNT = true;
+    #endif
+    m_async = allow_async && isNT ? 1 : 0;
+    if (m_async && allow_async == 3 && !wantAppendTo)
+    {
+      m_async = 3;
+      bufsize = (bufsize+4095)&~4095;
+      if (bufsize<4096) bufsize=4096;
+    }
 
     int rwflag = GENERIC_WRITE;
+    int createFlag= wantAppendTo?OPEN_ALWAYS:CREATE_ALWAYS;
+    int shareFlag = noFileLocking ? (FILE_SHARE_READ|FILE_SHARE_WRITE) : FILE_SHARE_READ;
     int flag = FILE_ATTRIBUTE_NORMAL;
 
     if (m_async)
     {
       rwflag |= GENERIC_READ;
-#ifdef WIN32_ASYNC_NOBUF_WRITE
-      flag |= FILE_FLAG_OVERLAPPED|FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH;
-#else
-      flag |= FILE_FLAG_OVERLAPPED|(allow_async>1 ? FILE_FLAG_WRITE_THROUGH: 0);
-#endif
+      if (m_async == 3)
+        flag |= FILE_FLAG_OVERLAPPED|FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH;
+      else
+        flag |= FILE_FLAG_OVERLAPPED|(allow_async>1 ? FILE_FLAG_WRITE_THROUGH: 0);
     }
 
     {
@@ -171,19 +184,19 @@ public:
           WDL_TypedBuf<WCHAR> wfilename;
           wfilename.Resize(szreq+10);
           if (MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,filename,-1,wfilename.Get(),wfilename.GetSize()))
-            m_fh = CreateFileW(wfilename.Get(),rwflag,FILE_SHARE_READ,NULL,CREATE_ALWAYS,flag,NULL);
+            m_fh = CreateFileW(wfilename.Get(),rwflag,shareFlag,NULL,createFlag,flag,NULL);
         }
         else
         {
           WCHAR wfilename[1024];
           if (MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,filename,-1,wfilename,1024))
-            m_fh = CreateFileW(wfilename,rwflag,FILE_SHARE_READ,NULL,CREATE_ALWAYS,flag,NULL);
+            m_fh = CreateFileW(wfilename,rwflag,shareFlag,NULL,createFlag,flag,NULL);
         }
       }
       
       if (m_fh == INVALID_HANDLE_VALUE)
 #endif
-        m_fh = CreateFileA(filename,rwflag,FILE_SHARE_READ,NULL,CREATE_ALWAYS,flag,NULL);
+        m_fh = CreateFileA(filename,rwflag,shareFlag,NULL,createFlag,flag,NULL);
     }
 
     if (m_async && m_fh != INVALID_HANDLE_VALUE)
@@ -199,25 +212,57 @@ public:
       }
     }
 
+    if (m_fh != INVALID_HANDLE_VALUE && wantAppendTo)
+      SetPosition(GetSize());
+ 
 #elif defined(WDL_POSIX_NATIVE_WRITE)
     m_bufspace_used=0;
     m_filedes_locked=false;
-    m_filedes=open(filename,O_WRONLY|O_CREAT,0644);
+    m_filedes=open(filename,O_WRONLY|O_CREAT
+        // todo: use fcntl() for platforms when O_CLOEXEC is not available (if we ever need to support them)
+        // (currently the only platform that meets this criteria is macOS w/ old SDK, but we don't use execve()
+        // there
+#ifdef O_CLOEXEC
+        | O_CLOEXEC
+#endif
+        ,0644);
     if (m_filedes>=0)
     {
-      int preverr;
-      if ((preverr=flock(m_filedes,LOCK_EX|LOCK_NB))<0 && errno == EWOULDBLOCK) // try to get exclusive, at least for a moment
+
+      if (!noFileLocking)
       {
-        // FAILED exclusive locking
-        close(m_filedes); 
-        m_filedes=-1;
+        m_filedes_locked = !flock(m_filedes,LOCK_EX|LOCK_NB);
+        if (!m_filedes_locked)
+        {
+          // this check might not be necessary, it might be sufficient to just fail and close if no exclusive lock possible
+          if (errno == EWOULDBLOCK)  
+          {
+            // FAILED exclusive locking because someone else has a lock
+            close(m_filedes); 
+            m_filedes=-1;
+          }
+          else  // failed for some other reason, try to keep a shared lock at least
+          {
+            m_filedes_locked = !flock(m_filedes,LOCK_SH|LOCK_NB);
+          }
+        }
       }
-      else 
+
+      if (m_filedes>=0)
       {
-        if (flock(m_filedes,LOCK_SH|LOCK_NB)>=0 || // return to shared lock
-            preverr>=0) m_filedes_locked=true;
+        if (!wantAppendTo)
+        {
+          if (ftruncate(m_filedes,0) < 0)
+          {
+            WDL_ASSERT( false /* ftruncate() failed in WDL_FileWrite */ );
+          }
+        }
+        else
+        {
+          struct stat st;
+          if (!fstat(m_filedes,&st))  SetPosition(st.st_size);
+        }
       }
-      if (m_filedes>=0) ftruncate(m_filedes,0);
 
       
 #ifdef __APPLE__
@@ -226,7 +271,9 @@ public:
     }
     if (minbufs * bufsize >= 16384) m_bufspace.Resize((minbufs*bufsize+4095)&~4095);
 #else
-    m_fp=fopen(filename,"wb");
+    m_fp=fopen(filename,wantAppendTo ? "a+b" : "wb");
+    if (wantAppendTo && m_fp) 
+      fseek(m_fp,0,SEEK_END);
 #endif
   }
 
@@ -249,7 +296,7 @@ public:
    {
      if (m_bufspace.GetSize() > 0 && m_bufspace_used>0)
      {
-       int v=pwrite(m_filedes,m_bufspace.Get(),m_bufspace_used,m_file_position);
+       int v=(int)pwrite(m_filedes,m_bufspace.Get(),m_bufspace_used,m_file_position);
        if (v>0) m_file_position+=v;
        if (m_file_position > m_file_max_position) m_file_max_position=m_file_position;
        m_bufspace_used=0;
@@ -285,8 +332,7 @@ public:
 
     if (m_async)
     {
-      char *pbuf=(char *)buf;
-
+      int rdpos = 0;
       while (len > 0)
       {
         if (!m_empties.GetSize()) 
@@ -296,8 +342,9 @@ public:
           if (ent)
           {
             bool wasabort=false;
+            DWORD err;
             if (GetOverlappedResult(m_fh,&ent->m_ol,&s,FALSE)||
-                (wasabort=(GetLastError()==ERROR_OPERATION_ABORTED))) 
+                (wasabort=((err=GetLastError())==ERROR_OPERATION_ABORTED))) 
             {
               m_pending.Delete(0);
 
@@ -310,6 +357,10 @@ public:
                 m_empties.Add(ent);
                 ent->m_bufused=0;
               }
+            }
+            else if (err != ERROR_IO_PENDING && err != ERROR_IO_INCOMPLETE)
+            {
+              WDL_FILEWRITE_ON_ERROR(err == ERROR_DISK_FULL)
             }
           }
         }
@@ -331,23 +382,26 @@ public:
 
         int ml=ent->m_bufsz-ent->m_bufused;
         if (ml>len) ml=len;
-        memcpy(ent->m_bufptr+ent->m_bufused,pbuf,ml);
+        memcpy(ent->m_bufptr+ent->m_bufused,(const char *)buf + rdpos,ml);
 
         ent->m_bufused+=ml;
         len-=ml;
-        pbuf+=ml;
+        rdpos+=ml;
 
         if (ent->m_bufused >= ent->m_bufsz)
         {
           if (RunAsyncWrite(ent,true)) m_empties.Delete(0); // if queued remove from list
         }
       }
-      return pbuf - (char *)buf; 
+      return rdpos; 
     }
     else
     {
       DWORD dw=0;
-      WriteFile(m_fh,buf,len,&dw,NULL);
+      if (!WriteFile(m_fh,buf,len,&dw,NULL))
+      {
+        WDL_FILEWRITE_ON_ERROR(GetLastError() == ERROR_DISK_FULL)
+      }
       m_file_position+=dw;
       if (m_file_position>m_file_max_position) m_file_max_position=m_file_position;
       return dw;
@@ -372,7 +426,8 @@ public:
        }
        if (m_bufspace_used >= m_bufspace.GetSize())
        {
-         int v=pwrite(m_filedes,m_bufspace.Get(),m_bufspace_used,m_file_position);
+         int v=(int)pwrite(m_filedes,m_bufspace.Get(),m_bufspace_used,m_file_position);
+         if (v != m_bufspace_used) { WDL_FILEWRITE_ON_ERROR(v>=0 || errno == EDQUOT || errno == ENOSPC) }
          if (v>0) m_file_position+=v;
          m_bufspace_used=0;
        }
@@ -381,13 +436,16 @@ public:
    }
    else
    {
-     int v=pwrite(m_filedes,buf,len,m_file_position);
+     int v=(int)pwrite(m_filedes,buf,len,m_file_position);
+     if (v != len) { WDL_FILEWRITE_ON_ERROR(v>=0 || errno == EDQUOT || errno == ENOSPC) }
      if (v>0) m_file_position+=v;
      if (m_file_position > m_file_max_position) m_file_max_position=m_file_position;
      return v;
    }
 #else
-    return fwrite(buf,1,len,m_fp);
+   int written = (int)fwrite(buf,1,len,m_fp);
+   if (written != len) { WDL_FILEWRITE_ON_ERROR(false) }
+   return written;
 #endif
 
     
@@ -454,8 +512,7 @@ public:
         if (m_file_position>m_file_max_position) m_file_max_position=m_file_position;
       }
 
-#ifdef WIN32_ASYNC_NOBUF_WRITE
-      if (ent->m_bufused&4095)
+      if (m_async == 3 && (ent->m_bufused&4095))
       {
         int offs=(ent->m_bufused&4095);
         char tmp[4096];
@@ -474,7 +531,7 @@ public:
 
         ent->m_bufused += 4096-offs;
       }
-#endif
+
       DWORD d=0;
 
       *(WDL_FILEWRITE_POSTYPE *)&ent->m_ol.Offset = ent->m_last_writepos;
@@ -488,6 +545,7 @@ public:
           m_pending.Add(ent);
           return true;
         }
+        else { WDL_FILEWRITE_ON_ERROR(GetLastError()==ERROR_DISK_FULL) }
       }
       ent->m_bufused=0;
     }
@@ -533,8 +591,7 @@ public:
       m_file_position=pos;
       if (m_file_position>m_file_max_position) m_file_max_position=m_file_position;
 
-#ifdef WIN32_ASYNC_NOBUF_WRITE
-      if (m_file_position&4095)
+      if (m_async==3 && (m_file_position&4095))
       {
         WDL_FileWrite__WriteEnt *ent=m_empties.Get(0);
         if (ent)
@@ -554,7 +611,6 @@ public:
           ent->m_bufused=(int)psz;
         }
       }
-#endif
       return false;
     }
 
@@ -562,13 +618,13 @@ public:
     if (m_file_position>m_file_max_position) m_file_max_position=m_file_position;
 
     LONG high=(LONG) (m_file_position>>32);
-    return SetFilePointer(m_fh,(LONG)(m_file_position&0xFFFFFFFFLL),&high,FILE_BEGIN)==0xFFFFFFFF && GetLastError() != NO_ERROR;
+    return SetFilePointer(m_fh,(LONG)(m_file_position&((WDL_FILEWRITE_POSTYPE)0xFFFFFFFF)),&high,FILE_BEGIN)==0xFFFFFFFF && GetLastError() != NO_ERROR;
 #elif defined(WDL_POSIX_NATIVE_WRITE)
 
     if (m_filedes < 0) return true;
     if (m_bufspace.GetSize() > 0 && m_bufspace_used>0)
     {
-      int v=pwrite(m_filedes,m_bufspace.Get(),m_bufspace_used,m_file_position);
+      int v=(int)pwrite(m_filedes,m_bufspace.Get(),m_bufspace_used,m_file_position);
       if (v>0) m_file_position+=v;
       if (m_file_position > m_file_max_position) m_file_max_position=m_file_position;
       m_bufspace_used=0;
@@ -588,7 +644,7 @@ public:
 #ifdef WDL_WIN32_NATIVE_WRITE
   HANDLE GetHandle() { return m_fh; }
   HANDLE m_fh;
-  bool m_async;
+  int m_async; // 3 = unbuffered
 
   int m_async_bufsize, m_async_minbufs, m_async_maxbufs;
 
