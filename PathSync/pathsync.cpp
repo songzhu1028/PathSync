@@ -1247,7 +1247,7 @@ BOOL WINAPI mainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
                             for (x = 0; x < 2; x++) {
                                 if (!(m_comparing & (2 << x))) {
                                     // update item
-                                    char *ptr = m_curscanner[x].GetCurrentFN();
+                                    char *ptr = (char *) m_curscanner[x].GetCurrentFN();
                                     if (strcmp(ptr, ".") && strcmp(ptr, "..")) {
                                         WDL_String relname;
                                         relname.Set(m_curscanner_relpath[x].Get());
